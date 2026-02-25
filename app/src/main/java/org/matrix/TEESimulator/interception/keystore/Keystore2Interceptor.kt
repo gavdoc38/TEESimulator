@@ -88,16 +88,26 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
         data: Parcel,
     ): TransactionResult {
         if (code == LIST_ENTRIES_TRANSACTION || code == LIST_ENTRIES_BATCHED_TRANSACTION) {
-            logTransaction(txId, transactionNames[code]!!, callingUid, callingPid, true)
+            logTransaction(txId, transactionNames[code]!!, callingUid, callingPid)
 
-            val packages = ConfigurationManager.getPackagesForUid(callingUid).joinToString()
-            val isGMS = packages.contains("com.google.android.gms")
-
-            if (isGMS || ConfigurationManager.shouldSkipUid(callingUid)) {
+            if (ConfigurationManager.shouldSkipUid(callingUid))
                 return TransactionResult.ContinueAndSkipPost
-            } else {
-                return TransactionResult.Continue
-            }
+
+            return runCatching {
+                    val isBatchMode = code == LIST_ENTRIES_BATCHED_TRANSACTION
+                    if (ListEntriesHandler.cacheParameters(txId, data, isBatchMode)) {
+                        TransactionResult.Continue
+                    } else {
+                        TransactionResult.ContinueAndSkipPost
+                    }
+                }
+                .getOrElse {
+                    SystemLogger.error(
+                        "[TX_ID: $txId] Failed to parse parameters for ${transactionNames[code]!!}",
+                        it,
+                    )
+                    TransactionResult.ContinueAndSkipPost
+                }
         } else if (
             code == GET_KEY_ENTRY_TRANSACTION ||
                 code == DELETE_KEY_TRANSACTION ||
@@ -173,12 +183,8 @@ object Keystore2Interceptor : AbstractKeystoreInterceptor() {
             logTransaction(txId, "post-${transactionNames[code]!!}", callingUid, callingPid)
 
             return runCatching {
-                    val isBatchMode = code == LIST_ENTRIES_BATCHED_TRANSACTION
-                    val params =
-                        ListEntriesHandler.cacheParameters(txId, data, isBatchMode)
-                            ?: throw Exception("Abort updating entries for invalid parameters.")
                     val updatedKeyDescriptors =
-                        ListEntriesHandler.injectGeneratedKeys(txId, callingUid, params, reply)
+                        ListEntriesHandler.injectGeneratedKeys(txId, callingUid, reply)
                     InterceptorUtils.createTypedArrayReply(updatedKeyDescriptors)
                 }
                 .getOrElse {
