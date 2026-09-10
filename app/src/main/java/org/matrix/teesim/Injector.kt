@@ -44,7 +44,12 @@ class Injector(private val moduleDir: File) {
         SystemLogger.info("injector: watching $procName (abi=$abi lib=$libName)")
         var failures = 0
         while (running) {
-            val pid = findPid(procName)
+            // The full /proc walk in findPid touches every process's cmdline (~1000 reads on a
+            // busy device) and used to run every 2s for the whole uptime, measured at ~1.4% of a
+            // core continuously, just to rediscover a pid that never changes between keystore
+            // restarts. Once injected, verify the known pid with one cmdline read and only fall
+            // back to the walk when the process is gone or reused.
+            val pid = if (lastPid > 0 && isNamedProcess(lastPid, procName)) lastPid else findPid(procName)
             // Tell the log tail which process to capture, so the Logs panel shows the target
             // keystore's own output — even before we manage to inject it.
             LogTail.targetPid = if (pid > 0) pid else -1
@@ -146,6 +151,23 @@ class Injector(private val moduleDir: File) {
             if (base == name) return dir.name.toIntOrNull() ?: continue
         }
         return -1
+    }
+    
+    /**
+     * True if /proc/[pid]/cmdline still names [name]: the cheap liveness probe that lets the loop
+     * skip the full /proc walk while the injected keystore is alive. A vanished or recycled pid
+     * (different cmdline) reads as false, which sends the loop back to [findPid].
+     */
+    private fun isNamedProcess(pid: Int, name: String): Boolean {
+        val cmd =
+            try {
+                File("/proc/$pid/cmdline").readBytes()
+            } catch (e: Exception) {
+                return false
+            }
+        if (cmd.isEmpty()) return false
+        val end = cmd.indexOf(0.toByte()).let { if (it < 0) cmd.size else it }
+        return String(cmd, 0, end).substringAfterLast('/') == name
     }
 
     private fun sleep(ms: Long) {
